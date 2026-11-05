@@ -30,8 +30,9 @@ type (
 	// - each backend selects which field to condition on
 	// - both empty: backend has nothing to pin against
 	ObjPin struct {
-		Version string // S3 VersionId, GCP generation
-		ETag    string // unquoted
+		Version   string // S3 VersionId, GCP generation
+		ETag      string // unquoted
+		ExactSize int64  // if positive, validate a range response against this HEAD size and the pinned ETag
 	}
 
 	Backend interface {
@@ -61,7 +62,7 @@ type (
 		GetObj(ctx context.Context, lom *LOM, owt cmn.OWT, origReq *http.Request) (ecode int, err error)
 		// get (jobs; REST)
 		// - offset, length: range read when length > 0, the entire object otherwise
-		// - pin: required for range reads (exactly one; see RangePin), not used otherwise
+		// - pin: required for range reads (exactly one; see RangePin); a conditional S3 whole fill may pass an ETag pin
 		GetObjReader(ctx context.Context, lom *LOM, offset, length int64, pin ...*ObjPin) GetReaderResult
 
 		// Multipart operations accept context independently of optional request headers.

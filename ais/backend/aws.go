@@ -34,6 +34,7 @@ import (
 	"github.com/NVIDIA/aistore/tracing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -42,6 +43,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 type (
@@ -427,12 +429,16 @@ func (*s3bp) HeadObj(_ context.Context, lom *core.LOM, oreq *http.Request) (oa *
 	oa = &cmn.ObjAttrs{}
 	oa.CustomMD = make(cos.StrKVs, 6)
 	oa.SetCustomKey(cmn.SourceObjMD, apc.AWS)
+	if headOutput.ContentLength == nil || *headOutput.ContentLength < 0 {
+		return nil, http.StatusBadGateway, errors.New("missing or invalid S3 object size")
+	}
 	oa.Size = *headOutput.ContentLength
 	if v, ok := h.EncodeVersion(headOutput.VersionId); ok {
 		oa.SetCustomKey(cmn.VersionObjMD, v)
 		oa.SetVersion(v)
 	}
-	if v, ok := h.EncodeETag(headOutput.ETag); ok {
+	if v, ok := h.EncodeETag(headOutput.ETag); ok &&
+		(lom.Bprops().Extra.AWS.ColdRangeLimit == 0 || strongS3ETag(aws.ToString(headOutput.ETag))) {
 		oa.SetCustomKey(cmn.ETag, v)
 	}
 	if v, ok := h.EncodeCksum(headOutput.ETag); ok {
@@ -547,10 +553,29 @@ func (s3bp *s3bp) GetObjReader(ctx context.Context, lom *core.LOM, offset, lengt
 			}
 			return res
 		}
+		if p := core.RangePin(pin); p != nil && p.ExactSize > 0 {
+			raw, ok := awsmiddleware.GetRawResponse(obj.ResultMetadata).(*smithyhttp.Response)
+			expected := fmt.Sprintf("bytes %d-%d/%d", offset, offset+length-1, p.ExactSize)
+			if !ok || raw == nil || raw.Response == nil || raw.StatusCode != http.StatusPartialContent ||
+				aws.ToString(obj.ContentRange) != expected || aws.ToInt64(obj.ContentLength) != length ||
+				aws.ToString(obj.ETag) != cmn.QuoteETag(p.ETag) {
+				cos.Close(obj.Body)
+				res.ErrCode, res.Err = http.StatusBadGateway, errors.New("invalid exact S3 range response")
+				return res
+			}
+		}
 	} else {
+		if len(pin) == 1 && pin[0] != nil {
+			input.IfMatch = aws.String(cmn.QuoteETag(pin[0].ETag))
+		}
 		obj, err = svc.GetObject(ctx, &input)
 		if err != nil {
 			res.ErrCode, res.Err = awsErrorToAISError(err, cloudBck, lom.ObjName, sessConf.detail())
+			return res
+		}
+		if input.IfMatch != nil && aws.ToString(obj.ETag) != *input.IfMatch {
+			cos.Close(obj.Body)
+			res.ErrCode, res.Err = http.StatusBadGateway, errors.New("invalid ETag on conditional S3 fill")
 			return res
 		}
 		// custom metadata
@@ -572,6 +597,19 @@ func (s3bp *s3bp) GetObjReader(ctx context.Context, lom *core.LOM, offset, lengt
 	res.R = obj.Body
 	res.Size = *obj.ContentLength
 	return res
+}
+
+// Check the wire representation before metadata normalization.
+func strongS3ETag(s string) bool {
+	if len(s) <= 2 || s[0] != '"' || s[len(s)-1] != '"' {
+		return false
+	}
+	for i := 1; i < len(s)-1; i++ {
+		if c := s[i]; c < 0x21 || c == '"' || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func _getCustom(lom *core.LOM, obj *s3.GetObjectOutput) (md5 *cos.Cksum) {

@@ -117,7 +117,11 @@ func (goi *getOI) coldReader(bp core.Backend, parallel bool) (res core.GetReader
 		!goi.lom.ECEnabled() && bp.Provider() != apc.OCI && !goi.t.crange.backingOff(goi.lom.Bprops()) {
 		ctx, stop = context.WithCancel(ctx)
 	}
-	res = bp.GetObjReader(ctx, goi.lom, 0, 0)
+	if goi.fillPin != nil {
+		res = bp.GetObjReader(ctx, goi.lom, 0, 0, goi.fillPin)
+	} else {
+		res = bp.GetObjReader(ctx, goi.lom, 0, 0)
+	}
 	return res, stop
 }
 

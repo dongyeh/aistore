@@ -114,7 +114,9 @@ type (
 	}
 
 	ExtraPropsAWS struct {
-		CloudRegion string `json:"cloud_region,omitempty"`
+		// Maximum buffered cold S3 range served without populating the whole object; zero disables.
+		ColdRangeLimit cos.SizeIEC `json:"cold_range_limit,omitempty"`
+		CloudRegion    string      `json:"cloud_region,omitempty"`
 
 		// from https://github.com/aws/aws-sdk-go/blob/main/aws/config.go:
 		// - "An optional endpoint URL (hostname only or fully qualified URI)
@@ -141,6 +143,7 @@ type (
 	}
 	// ExtraPropsAWSToSet is the partial-update counterpart of ExtraPropsAWS.
 	ExtraPropsAWSToSet struct {
+		ColdRangeLimit *cos.SizeIEC `json:"cold_range_limit,omitempty"` // +gen:optional
 		// AWS region for this bucket (e.g. `"us-east-1"`).
 		CloudRegion *string `json:"cloud_region,omitempty"` // +gen:optional
 		// S3 endpoint URL (hostname or fully qualified URI) that
@@ -484,6 +487,9 @@ func (c *ExtraProps) ValidateAsProps(arg ...any) error {
 }
 
 func (conf *ExtraPropsAWS) validate() error {
+	if conf.ColdRangeLimit < 0 || conf.ColdRangeLimit > 16*cos.MiB {
+		return errors.New("extra.aws.cold_range_limit must be between zero and 16MiB")
+	}
 	// multipart_size
 	size := conf.MultiPartSize
 	if size != -1 && size != 0 && (size < minPartSizeAWS || size > maxPartSizeAWS) {

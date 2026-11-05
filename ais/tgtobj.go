@@ -74,6 +74,7 @@ type (
 	}
 
 	getOI struct {
+		fillPin    *core.ObjPin // client-conditioned whole fill for an oversized range
 		req        *http.Request
 		w          http.ResponseWriter
 		wctrl      wdeadliner // non-nil: write deadline enabled (see initWdl)
@@ -724,11 +725,12 @@ func (goi *getOI) getObject() (ecode int, err error) {
 // is under rlock
 func (goi *getOI) get() (ecode int, err error) {
 	var (
-		uplock      *_uplock
-		cs          fs.CapStatus
-		doubleCheck bool
-		retried     bool
-		cold        bool
+		uplock       *_uplock
+		cs           fs.CapStatus
+		doubleCheck  bool
+		exactChecked bool
+		retried      bool
+		cold         bool
 	)
 do: // retry uplock or ec-recovery, the latter only once
 
@@ -817,6 +819,20 @@ do: // retry uplock or ec-recovery, the latter only once
 			return http.StatusInsufficientStorage, cs.Err()
 		}
 
+		// Exact reads use the remote version and never publish local data.
+		if limit := goi.lom.Bprops().Extra.AWS.ColdRangeLimit; limit > 0 && !exactChecked && cos.IsNotExist(err) &&
+			goi.dpq.isS3 && bp.Provider() == apc.AWS && goi.ranges.Range != "" {
+			goi.lom.Unlock(false)
+			if handled, code, er := goi.tryExactColdRange(bp, int64(limit)); handled {
+				goi.unlocked = true
+				return code, er
+			}
+			// An oversized range needs the regular path. Recheck residency under lock.
+			exactChecked = true
+			goi.lom.Lock(false)
+			cold = false
+			goto do
+		}
 		// try upgrading rlock => wlock
 		if !goi.lom.UpgradeLock() {
 			if uplock == nil {
@@ -837,6 +853,16 @@ do: // retry uplock or ec-recovery, the latter only once
 
 	// read locally and stream back
 fin:
+	// A concurrent fill can make a conditional footer reread warm during lock upgrade.
+	if goi.ranges.Range != "" && goi.dpq.isS3 && goi.lom.Bprops().Extra.AWS.ColdRangeLimit > 0 &&
+		goi.t.Backend(goi.lom.Bck()).Provider() == apc.AWS {
+		if match := goi.req.Header.Get("If-Match"); len(match) >= 2 && match[0] == '"' && match[len(match)-1] == '"' && strings.Count(match, `"`) == 2 {
+			etag, _ := goi.lom.GetCustomKey(cmn.ETag)
+			if etag == "" || cmn.QuoteETag(etag) != match {
+				return http.StatusPreconditionFailed, errors.New("resident ETag changed")
+			}
+		}
+	}
 	var fqn string
 	fqn, ecode, err = goi.txfini()
 	if err == nil {
@@ -916,7 +942,7 @@ func (goi *getOI) coldGet(bp core.Backend, config *cmn.Config) (int, error) {
 			case !used:
 			case er == nil:
 				return 0, nil
-			case cos.IsErrPreconditionFailed(er):
+			case cos.IsErrPreconditionFailed(er) && goi.fillPin == nil:
 				// remote object changed and nothing has been sent: refetch it sequentially
 				nlog.Warningln(goi.lom.Cname(), "changed during parallel cold GET, refetching:", er)
 				res = goi.coldRefetch(bp)
