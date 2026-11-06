@@ -811,6 +811,12 @@ do: // retry uplock or ec-recovery, the latter only once
 	// cold-GET: upgrade rlock => wlock and call t.Backend.GetObjReader
 	if cold {
 		bp := goi.t.Backend(goi.lom.Bck())
+		// Reject invalid stored limits before the positive-limit gate can treat them as disabled.
+		if goi.dpq.isS3 && goi.ranges.Range != "" && bp.Provider() == apc.AWS {
+			if er := cmn.ValidateColdRangeLimit(goi.lom.Bprops().Extra.AWS.ColdRangeLimit); er != nil {
+				return http.StatusInternalServerError, er
+			}
+		}
 		config := cmn.GCO.Get()
 		if cs.IsNil() {
 			cs = fs.Cap()

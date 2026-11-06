@@ -22,6 +22,12 @@ import (
 
 // serve a bounded range from a pinned remote object without holding the object lock.
 func (goi *getOI) tryExactColdRange(bp core.Backend, limit int64) (handled bool, code int, err error) {
+	if err = cmn.ValidateColdRangeLimit(cos.SizeIEC(limit)); err != nil {
+		return true, http.StatusInternalServerError, err
+	}
+	if limit == 0 {
+		return false, 0, nil
+	}
 	req := goi.req
 	if req.URL.Query().Has("versionId") {
 		return true, http.StatusNotImplemented, errors.New("exact cold range does not support version-specific requests")
@@ -88,7 +94,7 @@ func (goi *getOI) tryExactColdRange(bp core.Backend, limit int64) (handled bool,
 	hdr.Set(cos.HdrAcceptRanges, "bytes")
 	hdr.Set(cos.HdrContentRange, span.contentRange(attrs.Size))
 	hdr.Set(cos.HdrContentLength, strconv.Itoa(len(data)))
-	goi.initWdl()
+	ktlsRetire(goi.ktls, hdr, int64(len(data)))
 	goi.w.WriteHeader(http.StatusPartialContent)
 	n, err := goi.w.Write(data)
 	if err != nil || n != len(data) {
