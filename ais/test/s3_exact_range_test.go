@@ -34,6 +34,7 @@ import (
 type exactRangeOrigin struct {
 	mu               sync.Mutex
 	version          byte
+	size             int
 	badStatus        bool
 	ranges, matches  []string
 	entered, release chan struct{}
@@ -42,7 +43,10 @@ type exactRangeOrigin struct {
 
 // respond with deterministic content and record the backend GETs, including their version conditions.
 func (o *exactRangeOrigin) serve(w http.ResponseWriter, r *http.Request) {
-	const size = 2 * cos.MiB
+	size := o.size
+	if size == 0 {
+		size = 2 * cos.MiB
+	}
 	o.mu.Lock()
 	version, badStatus := o.version, o.badStatus
 	if r.Method == http.MethodGet {
