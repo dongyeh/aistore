@@ -939,6 +939,11 @@ func (t *target) getObject(w http.ResponseWriter, r *http.Request, dpq *dpq, bck
 		}
 	}
 
+	// Special flows can return before getOI performs its defensive check.
+	if _, code, err := t.exactRangeRequest(r, dpq, lom); err != nil {
+		return lom, cmn.NewErrHTTP(r, err, code)
+	}
+
 	var (
 		blobDownload = cos.IsParseBool(r.Header.Get(apc.HdrBlobDownload))
 		thresholdStr = r.Header.Get(apc.HdrBlobThreshold)

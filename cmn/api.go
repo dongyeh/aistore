@@ -25,6 +25,9 @@ import (
 	jsoniter "github.com/json-iterator/go"
 )
 
+// maximum body buffered by an exact cold range read.
+const MaxColdRangeLimit = 16 * cos.MiB
+
 // In this source: bucket props and assorted control messages that contain buckets, including:
 // - BsummResult
 // - ArchiveBckMsg
@@ -338,6 +341,11 @@ func (bp *Bprops) Validate(targetCnt int) error {
 		if !bp.BackendBck.IsRemote() {
 			return fmt.Errorf("backend bucket %q must be remote", bp.BackendBck.String())
 		}
+		if bp.BackendBck.Provider == apc.AWS {
+			if err := ValidateColdRangeLimit(bp.Extra.AWS.ColdRangeLimit); err != nil {
+				return err
+			}
+		}
 	}
 
 	// run assorted props validators
@@ -486,9 +494,17 @@ func (c *ExtraProps) ValidateAsProps(arg ...any) error {
 	return nil
 }
 
+// validate the configured buffer limit, including when loading existing bucket properties.
+func ValidateColdRangeLimit(limit cos.SizeIEC) error {
+	if limit < 0 || limit > MaxColdRangeLimit {
+		return fmt.Errorf("extra.aws.cold_range_limit must be between zero and %s", cos.IEC(MaxColdRangeLimit, 0))
+	}
+	return nil
+}
+
 func (conf *ExtraPropsAWS) validate() error {
-	if conf.ColdRangeLimit < 0 || conf.ColdRangeLimit > 16*cos.MiB {
-		return errors.New("extra.aws.cold_range_limit must be between zero and 16MiB")
+	if err := ValidateColdRangeLimit(conf.ColdRangeLimit); err != nil {
+		return err
 	}
 	// multipart_size
 	size := conf.MultiPartSize
