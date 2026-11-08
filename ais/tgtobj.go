@@ -732,6 +732,10 @@ func (goi *getOI) get() (ecode int, err error) {
 		retried      bool
 		cold         bool
 	)
+	match, ecode, err := goi.t.exactRangeRequest(goi.req, goi.dpq, goi.lom)
+	if err != nil {
+		return ecode, err
+	}
 do: // retry uplock or ec-recovery, the latter only once
 
 	err = goi.lom.Load(true /*cache it*/, true /*locked*/)
@@ -854,13 +858,12 @@ do: // retry uplock or ec-recovery, the latter only once
 	// read locally and stream back
 fin:
 	// A concurrent fill can make a conditional footer reread warm during lock upgrade.
-	if goi.ranges.Range != "" && goi.dpq.isS3 && goi.lom.Bprops().Extra.AWS.ColdRangeLimit > 0 &&
-		goi.t.Backend(goi.lom.Bck()).Provider() == apc.AWS {
-		if match := goi.req.Header.Get("If-Match"); len(match) >= 2 && match[0] == '"' && match[len(match)-1] == '"' && strings.Count(match, `"`) == 2 {
-			etag, _ := goi.lom.GetCustomKey(cmn.ETag)
-			if etag == "" || cmn.QuoteETag(etag) != match {
-				return http.StatusPreconditionFailed, errors.New("resident ETag changed")
-			}
+	if match != "" && match != "*" {
+		// Use the same resident representation as SetS3Headers, under the object lock.
+		_, mtime := goi.lom.LastModifiedStr()
+		etag := goi.lom.ETag(mtime, true /*allow syscall*/)
+		if etag == "" || cmn.QuoteETag(etag) != match {
+			return http.StatusPreconditionFailed, errors.New("resident ETag changed")
 		}
 	}
 	var fqn string
